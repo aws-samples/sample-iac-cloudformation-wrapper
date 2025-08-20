@@ -317,6 +317,8 @@ Resources:
 
   CodeBuildTriggerFunction:
     Type: "AWS::Lambda::Function"
+    # checkov:skip=CKV_AWS_115:See cfn_nag W92
+    # checkov:skip=CKV_AWS_117:See cfn_nag W89
     Metadata:
       cfn_nag:
         rules_to_suppress:

@@ -108,6 +108,11 @@ Your `Custom::CodeBuildTrigger` resource in the CloudFormation bootstrap has som
     - ⚠️ You can **only** set this parameter to `false` if your TF deployment will take longer than 1 hour - otherwise CloudFormation will time out, treat the deployment as failed, and begin rolling back.
 - `IgnoreUpdate`: Set `true` to **ignore** any `UPDATE` events. By default (`false`), updating the bootstrap stack *in a way that updates the input properties* of your `SampleDeployment` will re-trigger CodeBuild to run your `terraform apply` again.
 
+Consider using [Checkov](https://github.com/bridgecrewio/checkov) to detect opportunities to harden the CloudFormation and Terraform security configurations before working towards deploying in production environments:
+
+```sh
+checkov --directory . --quiet
+```
 
 ## Debugging
 
