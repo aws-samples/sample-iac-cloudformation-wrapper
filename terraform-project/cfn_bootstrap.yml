@@ -77,9 +77,9 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: W11
-            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the CDK solution without scoping down individual required services & resources"
+            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the solution without scoping down individual required services & resources"
           - id: W44
-            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the CDK solution without scoping down individual required services & resources"
+            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the solution without scoping down individual required services & resources"
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -152,7 +152,7 @@ Resources:
       Artifacts:
         Type: NO_ARTIFACTS
       ConcurrentBuildLimit: 1
-      Description: "CDK stack deployer"
+      Description: "Terraform deployer"
       Environment:
         ComputeType: BUILD_GENERAL1_LARGE
         EnvironmentVariables:
