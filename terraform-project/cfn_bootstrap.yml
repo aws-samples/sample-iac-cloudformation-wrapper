@@ -7,7 +7,7 @@ Description: |-
 
   This stack sets up an AWS CodeBuild Project to deploy the main solution and triggers the build
   once (via AWS Lambda) on stack create, plus again whenever the CodeBuildTrigger resource is
-  updated. On deletion, it triggers another CodeBuild job to attempt to destroy the TF resources.
+  updated. On deletion, it triggers another CodeBuild job to attempt to destroy the resources.
   Grants broad permissions to CodeBuild - not recommended for use in production environments.
 
 Parameters:
@@ -635,7 +635,7 @@ Resources:
                       cfnresponse.SUCCESS,
                       { "Reason": f"Started CodeBuild #{result['build']['buildNumber']}" },
                       # Changing physical ID would look like a 'replacement' to CloudFormation,
-                      # causing it to send a delete destroy request to the old physical ID after
+                      # causing it to send a delete/destroy request to the old physical ID after
                       # running terraform apply on the new one - which is pretty much never what we
                       # want.
                       physicalResourceId=event["LogicalResourceId"],

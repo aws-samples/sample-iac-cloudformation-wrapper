@@ -3,11 +3,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 
 Description: |-
   Quick-start CloudFormation template to deploy the CDK-based infrastructure sample via AWS
-  CodeBuild - with no local CDK/developer setup required.
+  CodeBuild - with no local developer setup required.
 
   This stack sets up an AWS CodeBuild Project to deploy the main solution and triggers the build
   once (via AWS Lambda) on stack create, plus again whenever the CodeBuildTrigger resource is
-  updated. On deletion, it triggers another CodeBuild job to attempt to destroy the CDK stack.
+  updated. On deletion, it triggers another CodeBuild job to attempt to destroy the resources.
   Grants broad permissions to CodeBuild - not recommended for use in production environments.
 
 Parameters:
@@ -61,9 +61,9 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: W11
-            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the CDK solution without scoping down individual required services & resources"
+            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the solution without scoping down individual required services & resources"
           - id: W44
-            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the CDK solution without scoping down individual required services & resources"
+            reason: "Not recommended for use in production environments: Grants CodeBuild broad access to deploy/destroy the solution without scoping down individual required services & resources"
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -402,7 +402,7 @@ Resources:
   # set up an AWS Lambda Function based Custom Resource to trigger the build whenever the stack is
   # created or updated:
 
-  LambdaExecutionRole:
+  CodeBuildTriggerExecutionRole:
     Type: "AWS::IAM::Role"
     Properties:
       AssumeRolePolicyDocument:
@@ -430,6 +430,9 @@ Resources:
 
   CodeBuildTriggerFunction:
     Type: "AWS::Lambda::Function"
+    # checkov:skip=CKV_AWS_115:See cfn_nag W92
+    # checkov:skip=CKV_AWS_116:Synchronous Lambda has no need for DLQ
+    # checkov:skip=CKV_AWS_117:See cfn_nag W89
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -553,9 +556,9 @@ Resources:
                       cfnresponse.SUCCESS,
                       { "Reason": f"Started CodeBuild #{result['build']['buildNumber']}" },
                       # Changing physical ID would look like a 'replacement' to CloudFormation,
-                      # causing it to send a delete/CDK destroy request to the old physical ID
-                      # after running CDK deploy on the new one - which is pretty much never what
-                      # we want.
+                      # causing it to send a delete/destroy request to the old physical ID after
+                      # running CDK deploy on the new one - which is pretty much never what we
+                      # want.
                       physicalResourceId=event["LogicalResourceId"],
                   )
 
@@ -608,8 +611,8 @@ Resources:
 
       Handler: "index.lambda_handler"
       MemorySize: 128
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: python3.10
+      Role: !GetAtt CodeBuildTriggerExecutionRole.Arn
+      Runtime: python3.13
       Timeout: 900
 
   # IF you enable CodeBuildCallback AND your deployment script creates 'cdk.outputs.json', the
@@ -622,7 +625,7 @@ Resources:
       ServiceToken: !GetAtt CodeBuildTriggerFunction.Arn
       ProjectName: !Ref CodeBuildProject
       BuildOnDelete: true
-      # NOTE: If CDK deployment takes longer than 1 hour, this CodeBuild-based callback to
+      # NOTE: If deployment takes longer than 1 hour, this CodeBuild-based callback to
       # CloudFormation *will not work* because CFn will time out. In that case can comment out /
       # unset `CodeBuildCallback`, and the bootstrap stack will "succeed" as soon as the CodeBuild
       # job is triggered, without waiting for it to complete.
