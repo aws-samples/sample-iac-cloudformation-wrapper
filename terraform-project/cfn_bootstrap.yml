@@ -71,6 +71,198 @@ Resources:
       VersioningConfiguration:
         Status: Enabled
 
+  # CloudFormation will fail to delete TFStateBucket on stack delete unless it's been emptied out,
+  # so we need to set up a custom resource Lambda to empty the bucket on delete:
+  TFStateCleanUpExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' # (CloudWatch Logs)
+      Policies:
+        - PolicyName: EmptyTFStateBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BucketPerms
+                Effect: Allow
+                Action:
+                  - "s3:GetBucketVersioning"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:ListBucketVersions"
+                Resource:
+                  - !GetAtt TFStateBucket.Arn
+              - Sid: ObjectPerms
+                Effect: Allow
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:DeleteObject"
+                  - "s3:DeleteObjectVersion"
+                Resource:
+                  - !Sub "${TFStateBucket.Arn}/*"
+
+  TFStateCleanUpFunction:
+    Type: "AWS::Lambda::Function"
+    # checkov:skip=CKV_AWS_115:See cfn_nag W92
+    # checkov:skip=CKV_AWS_116:Synchronous Lambda has no need for DLQ
+    # checkov:skip=CKV_AWS_117:See cfn_nag W89
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "IAM will authorize access to this rarely-used function: No need to put in VPC"
+          - id: W92
+            reason: "Only to be invoked by CREATE/UPDATE/DELETE CFN events for this stack: no reserved concurrency required"
+    Properties:
+      Description: "CloudFormation custom resource emptying an S3 bucket ready for deletion"
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          """Custom CloudFormation Resource to empty an S3 bucket on deletion
+
+          CFn Properties
+          --------------
+          BucketName : string
+              Name of the S3 bucket to empty
+          """
+
+          # Python Built-Ins:
+          import logging
+          import traceback
+
+          # External Dependencies:
+          import boto3
+          import cfnresponse
+
+          s3 = boto3.resource("s3")
+
+          def lambda_handler(event, context):
+              try:
+                  request_type = event["RequestType"]
+                  if request_type == "Create":
+                      handle_upsert(event, context)
+                  elif request_type == "Update":
+                      handle_upsert(event, context)
+                  elif request_type == "Delete":
+                      handle_delete(event, context)
+                  else:
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.FAILED,
+                          {},
+                          reason=f"Unsupported CFN RequestType '{request_type}'",
+                      )
+              except Exception as e:
+                  logging.error("Uncaught exception in CFN custom resource handler - reporting failure")
+                  traceback.print_exc()
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {},
+                      reason=f"See CloudWatch {context.log_group_name} > {context.log_stream_name} - {str(e)}",
+                  )
+                  raise e
+
+          def handle_upsert(event, context) -> None:
+              logging.info("**Received create/update event")
+              # Validate the new BucketName and fail if necessary:
+              res_config = event.get("ResourceProperties", {})
+              bucket_name = res_config.get("BucketName")
+              if not isinstance(bucket_name, str):
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {
+                          "Reason": (
+                              f"'BucketName' property must be a string (S3 bucket name). Got: {bucket_name}"
+                          ),
+                      },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+
+              # If an update request returns a different physical ID, CloudFormation will raise a delete
+              # event for the old one. Using the BucketName as our physical ID would correctly handle updates
+              # to change the underlying AWS::S3::Bucket's BucketName in the stack, because that change
+              # requires bucket replacement and this custom resource would empty the old bucket. However, we
+              # instead always propagate the original physical ID because this provides less destructive
+              # options in case the user *wants* to disengage this custom resource from their bucket without
+              # emptying the data:
+              cfnresponse.send(
+                  event,
+                  context,
+                  cfnresponse.SUCCESS,
+                  { "Reason": "Create/update is a no-op" },
+                  physicalResourceId=event.get(
+                      "PhysicalResourceId",
+                      "/".join((event.get("StackId"), event.get("RequestId")))
+                  ),
+              )
+
+          def handle_delete(event, context) -> None:
+              logging.info("**Received delete event")
+              res_config = event.get("ResourceProperties", {})
+              bucket_name = res_config.get("BucketName")
+              if not isinstance(bucket_name, str):
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      { "Reason": "Required 'BucketName' property not set" },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+              if not bucket_name:  # Escape hatch to detach without cleaning bucket
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.SUCCESS,
+                      { "Reason": "Ignoring explicitly empty '' BucketName" },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+
+              bucket = s3.Bucket(bucket_name)
+              bucket_versioning = s3.BucketVersioning(bucket_name)
+              for upload in bucket.multipart_uploads.all():
+                  upload.abort()
+              if bucket_versioning.status == "Enabled":
+                  bucket.object_versions.delete()
+              else:
+                  bucket.objects.delete()
+
+              cfnresponse.send(
+                  event,
+                  context,
+                  cfnresponse.SUCCESS,
+                  { "Reason": f"Deleted all objects from bucket {bucket_name}" },
+                  physicalResourceId=event["PhysicalResourceId"],
+              )
+
+      Handler: "index.lambda_handler"
+      MemorySize: 128
+      Role: !GetAtt TFStateCleanUpExecutionRole.Arn
+      Runtime: python3.13
+      Timeout: 900
+
+  EmptyTFStateBucketOnDelete:
+    Type: "Custom::EmptyS3BucketOnDelete"
+    Properties:
+      ServiceToken: !GetAtt TFStateCleanUpFunction.Arn
+      BucketName: !Ref TFStateBucket
+
   CodeBuildServiceRole:
     Type: "AWS::IAM::Role"
     Metadata:
@@ -289,7 +481,7 @@ Resources:
   # set up an AWS Lambda Function based Custom Resource to trigger the build whenever the stack is
   # created or updated:
 
-  LambdaExecutionRole:
+  CodeBuildTriggerExecutionRole:
     Type: "AWS::IAM::Role"
     Properties:
       AssumeRolePolicyDocument:
@@ -318,6 +510,7 @@ Resources:
   CodeBuildTriggerFunction:
     Type: "AWS::Lambda::Function"
     # checkov:skip=CKV_AWS_115:See cfn_nag W92
+    # checkov:skip=CKV_AWS_116:Synchronous Lambda has no need for DLQ
     # checkov:skip=CKV_AWS_117:See cfn_nag W89
     Metadata:
       cfn_nag:
@@ -497,8 +690,8 @@ Resources:
 
       Handler: "index.lambda_handler"
       MemorySize: 128
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: python3.10
+      Role: !GetAtt CodeBuildTriggerExecutionRole.Arn
+      Runtime: python3.13
       Timeout: 900
 
   # IF you enable CodeBuildCallback AND your deployment script creates 'tf.outputs.json', the
@@ -507,6 +700,8 @@ Resources:
   #     !GetAtt SampleDeployment.SomeOutput
   SampleDeployment:
     Type: "Custom::CodeBuildTrigger"
+    DependsOn:
+      - EmptyTFStateBucketOnDelete  # Don't clear out TF state bucket til `terraform destroy` done
     Properties:
       ServiceToken: !GetAtt CodeBuildTriggerFunction.Arn
       ProjectName: !Ref CodeBuildProject
