@@ -3,8 +3,8 @@
 
 terraform {
   backend "s3" {
-    encrypt = true
-    key = "tfstate/sample_terraform_cfn_wrapper"
+    encrypt      = true
+    key          = "tfstate/sample_terraform_cfn_wrapper"
     use_lockfile = true
   }
 
