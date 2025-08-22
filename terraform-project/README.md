@@ -18,20 +18,22 @@ As configured:
 
 ## Development experience
 
+The **Terraform CLI version** is specified in the `install` phase in [cfn_bootstrap.yml](./cfn_bootstrap.yml), and via [mise-en-place](https://github.com/jdx/mise) (in [mise.toml](./mise.toml)) for local development. If you don't want to use mise, you can just [install Terraform locally](https://developer.hashicorp.com/terraform/install) by your preferred method.
+
 In general, this folder is a typical Terraform project in which commands like `terraform init`, `terraform apply`, and so on can be run. The main consideration for local development is the **backend configuration**, which must be overridden to `init` successfully.
 
 Note that we don't configure AWS credentials or region explicitly in the TF project, instead assuming that you've [configured your AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html) - from which they'll be picked up automatically. Similarly when deploying via CloudFormation, the credentials and current AWS region will be picked up from the CodeBuild runtime environment.
 
 ### Choosing the Terraform backend
 
-To provide a one-click deployable experience with no external dependencies (but sensible behaviour in the event of updates over time), this pattern deploys an S3 bucket in the target account and uses that to track persistent state for the [Terraform backend](https://developer.hashicorp.com/terraform/language/backend).
+To provide a one-click deployable experience with no external dependencies (but sensible behaviour in the event of updates over time), this pattern deploys an S3 bucket in the target account and uses that to track persistent state for the [Terraform backend](https://developer.hashicorp.com/terraform/language/backend). This bucket is emptied and deleted when the user destroys the CloudFormation stack.
 
-For local TF development (where that bucket hasn't been created yet), you'll need a different backend configuration - which could even be just to track state in a local file as the simplest option.
+For local TF development (where the state bucket hasn't been created yet), you'll need a different backend configuration - which could even be just to track state in a local file as the simplest option.
 
 You have a few options here:
 
-1. If you already have an S3 bucket in your target AWS account to use for Terraform state management, you can just override our [partial configuration](https://developer.hashicorp.com/terraform/language/backend#partial-configuration) to specify the bucket name like `terraform init -backend-config "bucket={BUCKET_NAME}"` - which is the same as we do in [cfn_bootstrap.yml](./cfn_bootstrap.yml).
-2. Otherwise, for the simplest switch to the default local file backend, you could simply comment-out the `backend` block in [terraform.tf](./terraform.tf).
+1. If you already have an S3 bucket in your target AWS account to use for Terraform state management, you can just override our [partial configuration](https://developer.hashicorp.com/terraform/language/backend#partial-configuration) to specify the bucket name by running `terraform init -backend-config "bucket={BUCKET_NAME}"` (which is the same as we do in [cfn_bootstrap.yml](./cfn_bootstrap.yml)).
+2. Otherwise, to switch to Terraform's default local file backend, you could simply comment-out the `backend` block in [terraform.tf](./terraform.tf).
 3. For more complex multi-environment setups, you could consider Terraform workspaces or multi-folder approaches as detailed in third-party blogs like [[1](https://www.geeksforgeeks.org/devops/how-to-manage-multiple-environments-with-terraform/)], [[2](https://medium.com/@b0ld8/terraform-manage-multiple-environments-63939f41c454)]. You would then need to customize the deployment steps in [cfn_bootstrap.yml](cfn_bootstrap.yml) to, for example, `cd` to a particular environment's subdirectory or configure a particular workspace before running `terraform init`.
 
 
@@ -65,10 +67,47 @@ If you prefer to hard-code the location of your source in the template, rather t
 
 For input parameters you **want to expose** from your Terraform project to users at CloudFormation deployment time:
 
-1. In your TF project, define & read the parameter as a root-level [input variable](https://developer.hashicorp.com/terraform/language/values/variables#input-variables).
-2. In [cfn_bootstrap.yml](cfn_bootstrap.yml):
-    1. Add your configuration to the `Parameters` section (like our `ExampleVisibilityTimeout`) - and update the `ParameterGroups` section [if you're using that](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-cloudformation-interface.html).
-    2. Pass the parameter through to the CodeBuild `EnvironmentVariables` with name like `TF_VAR_{your_variable_name}`. These values will be picked up as described [here in the Terraform docs](https://developer.hashicorp.com/terraform/language/values/variables#assigning-values-to-root-module-variables)
+1. In your TF project, define & read the parameter as a root-level [input variable](https://developer.hashicorp.com/terraform/language/values/variables#input-variables) - as we show in [variables.tf](./variables.tf):
+
+```hcl title="variables.tf"
+variable "queue_visibility_timeout" {
+  default     = 300
+  description = "Visibility timeout for the created SQS queue in seconds"
+  type        = number
+}
+```
+
+2. In [cfn_bootstrap.yml](cfn_bootstrap.yml), add your configuration to the `Parameters` section (and update the `ParameterGroups` section [if you're using that](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-cloudformation-interface.html)):
+
+```yaml title="cfn_bootstrap.yml"
+Parameters:
+  ...
+  ExampleVisibilityTimeout:
+    Type: Number
+    MaxValue: 43200
+    MinValue: 0
+    Default: 300
+    Description: >-
+      Example solution parameter exposed to CloudFormation: Visibility time-out of the SQS queue in
+      seconds. Must be a whole number.
+```
+
+3. Pass the parameter through to the CodeBuild `EnvironmentVariables` with name like `TF_VAR_{your_variable_name}`. These values will be picked up as described [here in the Terraform docs](https://developer.hashicorp.com/terraform/language/values/variables#assigning-values-to-root-module-variables):
+
+```yaml title="cfn_bootstrap.yml"
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    ...
+    Properties:
+      ...
+      Environment:
+        ComputeType: BUILD_GENERAL1_LARGE
+        EnvironmentVariables:
+          ...
+          - Name: TF_VAR_queue_visibility_timeout
+            Type: PLAINTEXT
+            Value: !Ref ExampleVisibilityTimeout
+```
 
 
 ### Publishing output values
@@ -77,10 +116,33 @@ This pattern supports exposing root-level [output values](https://developer.hash
 
 This process is set up in [cfn_bootstrap.yml](./cfn_bootstrap.yml), and works as follows:
 
-1. We run `terraform output -json > tf.outputs.json` after deployment, to store the Terraform outputs in an (ephemeral) local file in the CodeBuild job
-    - Note: You can skip this step, if you don't need any outputs publishing back to CloudFormation
-2. The Python script in the `finally` step checks if that file exists, and sends the name-value map (excluding `sensitive` entries) to CloudFormation as `Data` if so. These data entries can then be accessed via CloudFormation [GetAtt](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/intrinsic-function-reference-getatt.html).
-3. To publish those individual resource attributes as overall [outputs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/outputs-section-structure.html) of the "stack" in the CloudFormation UI, we reference them as shown in e.g. `!GetAtt SampleDeployment.QueueArn`
+1. The value is defined as a root-level output (in [outputs.tf](./outputs.tf)):
+
+```hcl title="outputs.tf"
+output "QueueArn" {
+  description = "ARN of the created example SQS queue resource"
+  value       = aws_sqs_queue.example_queue.arn
+}
+```
+
+2. We run `terraform output -json > tf.outputs.json` after deployment, to store the Terraform outputs in an (ephemeral) local file in the CodeBuild job
+
+> **Note:** You can skip this step, if you don't need **any** outputs publishing back to CloudFormation
+
+```yaml title="cfn_bootstrap.yml"
+        - terraform output -json > tf.outputs.json
+```
+
+3. The Python script in the `finally` step (which you won't normally need to edit) checks if that file exists, and passes the name-value map (excluding `sensitive` entries) to CloudFormation as `Data` if so. These attributes can then be referenced in the CloudFormation template via [GetAtt](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/intrinsic-function-reference-getatt.html) - for example `!GetAtt SampleDeployment.QueueArn`.
+4. To publish those resource attributes as overall [outputs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/outputs-section-structure.html) of the "stack" in the CloudFormation UI, we set up outputs as shown by `ExampleQueueArn`.
+
+```yaml title="cfn_bootstrap.yml"
+Outputs:
+  ...
+  ExampleQueueArn:
+    Description: Example re-published CDK output - ARN of the created SQS Queue
+    Value: !GetAtt SampleDeployment.QueueArn
+```
 
 
 ### Required permissions and security considerations
@@ -102,6 +164,7 @@ As a result, some key considerations include:
 Your `Custom::CodeBuildTrigger` resource in the CloudFormation bootstrap has some other parameters with sensible defaults but that you might need to be aware of:
 
 - `BuildOnDelete`: Set `true` (as we have) to run the `terraform destroy` command when the bootstrap stack is deleted. By default (`false`) deleting the bootstrap stack itself won't re-run the CodeBuild job and therefore won't delete the actual Terraform-managed resources that were deployed.
+    - If you **want** to preserve the solution when the CloudFormation stack's destroyed though, you should also *remove* the `TFStateCleanUpExecutionRole`, `TFStateCleanUpFunction`, and `EmptyTFStateBucketOnDelete` resources and set a `DeletionPolicy: Retain` [deletion policy](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html) on the `TFStateBucket` - to preserve the Terraform state too.
 - `CodeBuildCallback`: Set `true` (as we have) to **wait** for the CodeBuild project to run.
     - By default (`false`), the `SampleDeployment` resource would return `CREATE_COMPLETE` as soon as the CodeBuild job is started
     - ⚠️ You can **only** publish TF outputs back to the bootstrap stack if this parameter is set to `true`

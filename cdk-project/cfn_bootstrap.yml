@@ -296,7 +296,7 @@ Resources:
           env:
             shell: bash
           phases:
-            pre_build:
+            install:
               commands:
                 - set -ex
                 # Up-front install to fail early (but we reinst later in case it's overwritten):

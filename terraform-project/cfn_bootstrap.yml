@@ -380,13 +380,10 @@ Resources:
           phases:
             install:
               commands:
+                - set -ex
                 - wget --no-verbose https://releases.hashicorp.com/terraform/1.12.2/terraform_1.12.2_linux_amd64.zip
                 - unzip terraform_1.12.2_linux_amd64.zip
                 - mv terraform /usr/local/bin/
-            pre_build:
-              commands:
-                - set -ex
-                # Up-front install to fail early (but we reinst later in case it's overwritten):
                 - pip3 install "requests>=2.27,<3"
             build:
               commands:
