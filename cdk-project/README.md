@@ -29,6 +29,7 @@ This project is derived from the same base template you'd get by running `npx cd
 - `npx cdk synth` - Emit the [synthesized](https://docs.aws.amazon.com/cdk/v2/guide/ref-cli-cmd-synth.html) CloudFormation template(s) of the app
 - `npx cdk deploy` - Deploy the stack(s) to the currently-selected AWS account & region
 
+Note that we've specified the `aws-cdk` CLI as a dependency in the [package.json](./package.json) of the project itself, rather than assuming it's installed globally on your machine as some CDK guides suggest.
 
 ## How your CDK code interacts with the bootstrap
 
