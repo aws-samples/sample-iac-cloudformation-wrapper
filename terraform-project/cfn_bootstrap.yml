@@ -348,7 +348,7 @@ Resources:
       Environment:
         ComputeType: BUILD_GENERAL1_LARGE
         EnvironmentVariables:
-          # Pass through CloudFormation parameters to TF deploy job
+          # Pass CloudFormation parameters through to the deploy job
           # Code fetch parameters:
           - Name: PUBLIC_REPO
             Type: PLAINTEXT
