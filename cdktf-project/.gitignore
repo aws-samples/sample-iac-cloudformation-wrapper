@@ -1,0 +1,17 @@
+# CDKTF outputs file created by our pattern:
+cdktf.outputs.json
+
+# JavaScript / TypeScript
+*.d.ts
+*.js
+!jest.config.js
+!setup.js
+node_modules
+
+# CDKTF / Terraform
+cdktf.out
+cdktf.log
+*terraform.*.tfstate*
+.gen
+.terraform
+tsconfig.tsbuildinfo

@@ -267,7 +267,7 @@ Resources:
       Artifacts:
         Type: NO_ARTIFACTS
       ConcurrentBuildLimit: 1
-      Description: "CDK stack deployer"
+      Description: "CDK app deployer"
       Environment:
         ComputeType: BUILD_GENERAL1_LARGE
         EnvironmentVariables:
