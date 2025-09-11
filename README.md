@@ -1,6 +1,6 @@
 # One-click AWS deployment, whatever your IaC framework
 
-This repository shares re-usable patterns for packaging your {CDK, Terraform, Pulumi} projects inside [AWS CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) templates for easy sharing and deployment.
+This repository shares re-usable patterns for packaging your {CDK, Terraform, CDKTF, Pulumi} projects inside [AWS CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) templates for easy sharing and deployment.
 
 
 ## Why?
@@ -42,6 +42,7 @@ From our experience applying this pattern to share samples, we address more adva
 The pattern is essentially the same regardless of which IaC tool you'd like to use, but it's easiest to demonstrate with reference to an example project. Check out:
 
 - [cdk-project](cdk-project/README.md) - Example project with AWS CDK (TypeScript)
+- [cdktf-project](cdktf-project/README.md) - Example project with CDK for Terraform (TypeScript)
 - [terraform-project](terraform-project/README.md) - Example project with Terraform
 - 👷 **Coming soon** - Example project with Pulumi
 

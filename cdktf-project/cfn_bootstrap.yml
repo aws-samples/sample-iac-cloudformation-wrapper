@@ -2,7 +2,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: |-
-  Quick-start CloudFormation template to deploy the CDK-based infrastructure sample via AWS
+  Quick-start CloudFormation template to deploy the CDKTF-based infrastructure sample via AWS
   CodeBuild - with no local developer setup required.
 
   This stack sets up an AWS CodeBuild Project to deploy the main solution and triggers the build
@@ -24,8 +24,8 @@ Parameters:
     Type: String
     Default: https://github.com/aws-samples/sample-iac-cloudformation-wrapper
     Description: >-
-      The CDK code to be deployed: A git clone-able URL, public .zip archive URL, or s3:// URI to a
-      zip archive. NOTE: For security, only deploy code from trusted sources.
+      The CDKTF code to be deployed: A git clone-able URL, public .zip archive URL, or s3:// URI to
+      a zip archive. NOTE: For security, only deploy code from trusted sources.
 
   CodeRepoBranch:
     Type: String
@@ -35,9 +35,9 @@ Parameters:
   
   CodeRepoFolder:
     Type: String
-    Default: cdk-project
+    Default: cdktf-project
     Description: >-
-      Subfolder in the repository containing the deployable CDK app. Leading slash optional. Set
+      Subfolder in the repository containing the deployable CDKTF app. Leading slash optional. Set
       '/' (not empty) for root folder.
 
 Metadata:
@@ -55,6 +55,214 @@ Metadata:
           - CodeRepoFolder
 
 Resources:
+
+  TFStateBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  # CloudFormation will fail to delete TFStateBucket on stack delete unless it's been emptied out,
+  # so we need to set up a custom resource Lambda to empty the bucket on delete:
+  TFStateCleanUpExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' # (CloudWatch Logs)
+      Policies:
+        - PolicyName: EmptyTFStateBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BucketPerms
+                Effect: Allow
+                Action:
+                  - "s3:GetBucketVersioning"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:ListBucketVersions"
+                Resource:
+                  - !GetAtt TFStateBucket.Arn
+              - Sid: ObjectPerms
+                Effect: Allow
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:DeleteObject"
+                  - "s3:DeleteObjectVersion"
+                Resource:
+                  - !Sub "${TFStateBucket.Arn}/*"
+
+  TFStateCleanUpFunction:
+    Type: "AWS::Lambda::Function"
+    # checkov:skip=CKV_AWS_115:See cfn_nag W92
+    # checkov:skip=CKV_AWS_116:Synchronous Lambda has no need for DLQ
+    # checkov:skip=CKV_AWS_117:See cfn_nag W89
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "IAM will authorize access to this rarely-used function: No need to put in VPC"
+          - id: W92
+            reason: "Only to be invoked by CREATE/UPDATE/DELETE CFN events for this stack: no reserved concurrency required"
+    Properties:
+      Description: "CloudFormation custom resource emptying an S3 bucket ready for deletion"
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          """Custom CloudFormation Resource to empty an S3 bucket on deletion
+
+          CFn Properties
+          --------------
+          BucketName : string
+              Name of the S3 bucket to empty
+          """
+
+          # Python Built-Ins:
+          import logging
+          import traceback
+
+          # External Dependencies:
+          import boto3
+          import cfnresponse
+
+          s3 = boto3.resource("s3")
+
+          def lambda_handler(event, context):
+              try:
+                  request_type = event["RequestType"]
+                  if request_type == "Create":
+                      handle_upsert(event, context)
+                  elif request_type == "Update":
+                      handle_upsert(event, context)
+                  elif request_type == "Delete":
+                      handle_delete(event, context)
+                  else:
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.FAILED,
+                          {},
+                          reason=f"Unsupported CFN RequestType '{request_type}'",
+                      )
+              except Exception as e:
+                  logging.error("Uncaught exception in CFN custom resource handler - reporting failure")
+                  traceback.print_exc()
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {},
+                      reason=f"See CloudWatch {context.log_group_name} > {context.log_stream_name} - {str(e)}",
+                  )
+                  raise e
+
+          def handle_upsert(event, context) -> None:
+              logging.info("**Received create/update event")
+              # Validate the new BucketName and fail if necessary:
+              res_config = event.get("ResourceProperties", {})
+              bucket_name = res_config.get("BucketName")
+              if not isinstance(bucket_name, str):
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {
+                          "Reason": (
+                              f"'BucketName' property must be a string (S3 bucket name). Got: {bucket_name}"
+                          ),
+                      },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+
+              # If an update request returns a different physical ID, CloudFormation will raise a delete
+              # event for the old one. Using the BucketName as our physical ID would correctly handle updates
+              # to change the underlying AWS::S3::Bucket's BucketName in the stack, because that change
+              # requires bucket replacement and this custom resource would empty the old bucket. However, we
+              # instead always propagate the original physical ID because this provides less destructive
+              # options in case the user *wants* to disengage this custom resource from their bucket without
+              # emptying the data:
+              cfnresponse.send(
+                  event,
+                  context,
+                  cfnresponse.SUCCESS,
+                  { "Reason": "Create/update is a no-op" },
+                  physicalResourceId=event.get(
+                      "PhysicalResourceId",
+                      "/".join((event.get("StackId"), event.get("RequestId")))
+                  ),
+              )
+
+          def handle_delete(event, context) -> None:
+              logging.info("**Received delete event")
+              res_config = event.get("ResourceProperties", {})
+              bucket_name = res_config.get("BucketName")
+              if not isinstance(bucket_name, str):
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      { "Reason": "Required 'BucketName' property not set" },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+              if not bucket_name:  # Escape hatch to detach without cleaning bucket
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.SUCCESS,
+                      { "Reason": "Ignoring explicitly empty '' BucketName" },
+                      physicalResourceId=event["PhysicalResourceId"],
+                  )
+                  return
+
+              bucket = s3.Bucket(bucket_name)
+              bucket_versioning = s3.BucketVersioning(bucket_name)
+              for upload in bucket.multipart_uploads.all():
+                  upload.abort()
+              if bucket_versioning.status == "Enabled":
+                  bucket.object_versions.delete()
+              else:
+                  bucket.objects.delete()
+
+              cfnresponse.send(
+                  event,
+                  context,
+                  cfnresponse.SUCCESS,
+                  { "Reason": f"Deleted all objects from bucket {bucket_name}" },
+                  physicalResourceId=event["PhysicalResourceId"],
+              )
+
+      Handler: "index.lambda_handler"
+      MemorySize: 128
+      Role: !GetAtt TFStateCleanUpExecutionRole.Arn
+      Runtime: python3.13
+      Timeout: 900
+
+  EmptyTFStateBucketOnDelete:
+    Type: "Custom::EmptyS3BucketOnDelete"
+    Properties:
+      ServiceToken: !GetAtt TFStateCleanUpFunction.Arn
+      BucketName: !Ref TFStateBucket
+
   CodeBuildServiceRole:
     Type: "AWS::IAM::Role"
     Metadata:
@@ -77,84 +285,6 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Your CDK app needs to be able to create and manage stacks:
-              - Sid: CloudFormationUnscoped
-                Effect: Allow
-                Action:
-                  - "cloudformation:BatchDescribeTypeConfigurations"
-                  - "cloudformation:CreateStackSet"
-                  - "cloudformation:DescribeAccountLimits"
-                  - "cloudformation:DescribeOrganizationsAccess"
-                  - "cloudformation:DescribeStackDriftDetectionStatus"
-                  - "cloudformation:DescribeType"
-                  - "cloudformation:DescribeTypeRegistration"
-                  - "cloudformation:EstimateTemplateCost"
-                  - "cloudformation:ListExports"
-                  - "cloudformation:ListImports"
-                  - "cloudformation:ListStackSets"
-                  - "cloudformation:ListStacks"
-                  - "cloudformation:ListTypeRegistrations"
-                  - "cloudformation:ListTypeVersions"
-                  - "cloudformation:ListTypes"
-                  - "cloudformation:ValidateTemplate"
-                Resource: "*"
-              - Sid: CloudFormation
-                Effect: Allow
-                Action:
-                  - "cloudformation:CancelUpdateStack"
-                  - "cloudformation:ContinueUpdateRollback"
-                  - "cloudformation:CreateChangeSet"
-                  - "cloudformation:CreateStack"
-                  - "cloudformation:CreateStackInstances"
-                  - "cloudformation:CreateStackRefactor"
-                  - "cloudformation:DeleteChangeSet"
-                  - "cloudformation:DeleteStack"
-                  - "cloudformation:DeleteStackInstances"
-                  - "cloudformation:DeleteStackSet"
-                  - "cloudformation:DescribeChangeSet"
-                  - "cloudformation:DescribeChangeSetHooks"
-                  - "cloudformation:DescribeStackEvents"
-                  - "cloudformation:DescribeStackInstance"
-                  - "cloudformation:DescribeStackResource"
-                  - "cloudformation:DescribeStackResourceDrifts"
-                  - "cloudformation:DescribeStackResources"
-                  - "cloudformation:DescribeStackSet"
-                  - "cloudformation:DescribeStackSetOperation"
-                  - "cloudformation:DescribeStacks"
-                  - "cloudformation:DetectStackDrift"
-                  - "cloudformation:DetectStackResourceDrift"
-                  - "cloudformation:DetectStackSetDrift"
-                  - "cloudformation:ExecuteChangeSet"
-                  - "cloudformation:ExecuteStackRefactor"
-                  - "cloudformation:GetStackPolicy"
-                  - "cloudformation:GetTemplate"
-                  - "cloudformation:GetTemplateSummary"
-                  - "cloudformation:ListChangeSets"
-                  - "cloudformation:ListHookResults"
-                  - "cloudformation:ListStackInstanceResourceDrifts"
-                  - "cloudformation:ListStackInstances"
-                  - "cloudformation:ListStackRefactorActions"
-                  - "cloudformation:ListStackRefactors"
-                  - "cloudformation:ListStackResources"
-                  - "cloudformation:ListStackSetAutoDeploymentTargets"
-                  - "cloudformation:ListStackSetOperationResults"
-                  - "cloudformation:ListStackSetOperations"
-                  - "cloudformation:RecordHandlerProgress"
-                  - "cloudformation:RollbackStack"
-                  - "cloudformation:SetStackPolicy"
-                  - "cloudformation:SignalResource"
-                  - "cloudformation:StopStackSetOperation"
-                  - "cloudformation:TagResource"
-                  - "cloudformation:UntagResource"
-                  - "cloudformation:UpdateStack"
-                  - "cloudformation:UpdateStackInstances"
-                  - "cloudformation:UpdateTerminationProtection"
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*'
-                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*'
-                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/*'
-                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset-target/*'
-                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:type/resource/*'
               # You almost certainly want to see logs in case the deployment goes wrong...
               - Sid: CloudWatchLogs
                 Effect: Allow
@@ -165,7 +295,24 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*"
-              # Our example app provisions an SQS Queue
+              - Sid: TFStateBucketList
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !GetAtt TFStateBucket.Arn
+              # Could consider scoping down further if your TF backend key will always be same or
+              # fall under a known path. For more details on required state bucket permissions, see
+              # https://developer.hashicorp.com/terraform/language/backend/s3#permissions-required
+              - Sid: TFStateBucketAccess
+                Effect: Allow
+                Action:
+                  - "s3:DeleteObject"
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${TFStateBucket.Arn}/*"
+              # Our example app just provisions an SQS Queue:
               - Sid: SQS
                 Effect: Allow
                 Action:
@@ -180,76 +327,6 @@ Resources:
                   - "sqs:UntagQueue"
                 Resource:
                   - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:*"
-              # In addition to the solution itself (CloudFormation, SQS), `cdk bootstrap` will
-              # require other permissions on IAM, ECR, SSM, S3.
-              # See: https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping-env.html#bootstrapping-env-permissions
-              - Sid: CDKBootstrapExtras
-                Effect: Allow
-                Action:
-                  - "ecr:*"
-                  - "s3:*"
-                  - "ssm:*"
-                Resource: "*"
-              # CDK Bootstrap (and many solution stacks) makes use of IAM Roles, so we need broad
-              # permissions to deploy/update/destroy those... But we should have no need to touch
-              # certain other types of resource like Users, Groups, etc: So can still enforce some
-              # IAM control points:
-              - Sid: IAMUnscoped
-                Effect: Allow
-                Action:
-                  - "iam:ListOrganizationsFeatures"
-                  - "iam:ListPolicies"
-                  - "iam:ListRoles"
-                  - "iam:ListSTSRegionalEndpointsStatus"
-                Resource:
-                  - "*"
-              - Sid: IAMPolicies
-                Effect: Allow
-                Action:
-                  - "iam:CreatePolicy"
-                  - "iam:CreatePolicyVersion"
-                  - "iam:DeletePolicy"
-                  - "iam:DeletePolicyVersion"
-                  - "iam:GetPolicy"
-                  - "iam:GetPolicyVersion"
-                  - "iam:ListEntitiesForPolicy"
-                  - "iam:ListPolicyTags"
-                  - "iam:ListPolicyVersions"
-                  - "iam:SetDefaultPolicyVersion"
-                  - "iam:TagPolicy"
-                  - "iam:UntagPolicy"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/*"
-              - Sid: IAMRoles
-                Effect: Allow
-                Action:
-                  - "iam:AttachRolePolicy"
-                  - "iam:CreateRole"
-                  - "iam:CreateServiceLinkedRole"
-                  - "iam:DeleteRole"
-                  # EXCLUDE DeleteRolePermissionsBoundary
-                  - "iam:DeleteRolePolicy"
-                  - "iam:DeleteServiceLinkedRole"
-                  - "iam:DetachRolePolicy"
-                  - "iam:GetContextKeysForPrincipalPolicy"
-                  - "iam:GetRole"
-                  - "iam:GetRolePolicy"
-                  - "iam:GetServiceLinkedRoleDeletionStatus"
-                  - "iam:ListAttachedRolePolicies"
-                  - "iam:ListInstanceProfilesForRole"
-                  - "iam:ListPoliciesGrantingServiceAccess"
-                  - "iam:ListRolePolicies"
-                  - "iam:ListRoleTags"
-                  - "iam:PassRole"
-                  # EXCLUDE PutRolePermissionsBoundary
-                  - "iam:PutRolePolicy"
-                  - "iam:TagRole"
-                  - "iam:UntagRole"
-                  - "iam:UpdateAssumeRolePolicy"
-                  - "iam:UpdateRole"
-                  - "iam:UpdateRoleDescription"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
       #### While generous permissions like the commented-out managed policy below might be useful
       #### for initial debugging of apps that touch many services, best-practice is to scope down
       #### to just the access required to bootstrap and deploy the particular solution:
@@ -267,15 +344,11 @@ Resources:
       Artifacts:
         Type: NO_ARTIFACTS
       ConcurrentBuildLimit: 1
-      Description: "CDK app deployer"
+      Description: "CDKTF app deployer"
       Environment:
         ComputeType: BUILD_GENERAL1_LARGE
         EnvironmentVariables:
           # Pass CloudFormation parameters through to the deploy job
-          # Solution parameters:
-          - Name: EXAMPLE_VISIBILITY_TIMEOUT
-            Type: PLAINTEXT
-            Value: !Ref ExampleVisibilityTimeout
           # Code fetch parameters:
           - Name: PUBLIC_REPO
             Type: PLAINTEXT
@@ -286,6 +359,13 @@ Resources:
           - Name: PUBLIC_REPO_FOLDER
             Type: PLAINTEXT
             Value: !Ref CodeRepoFolder
+          # Terraform backend:
+          - Name: TF_STATE_BUCKET
+            Value: !Ref TFStateBucket
+          # Solution parameters:
+          - Name: TF_VAR_QueueVisibilityTimeout
+            Type: PLAINTEXT
+            Value: !Ref ExampleVisibilityTimeout
         Image: "aws/codebuild/standard:7.0"
         ImagePullCredentialsType: CODEBUILD
         PrivilegedMode: true # Need to build container images within the project
@@ -301,7 +381,9 @@ Resources:
             install:
               commands:
                 - set -ex
-                # Up-front install to fail early (but we reinst later in case it's overwritten):
+                - wget --no-verbose https://releases.hashicorp.com/terraform/1.12.2/terraform_1.12.2_linux_amd64.zip
+                - unzip terraform_1.12.2_linux_amd64.zip
+                - mv terraform /usr/local/bin/
                 - pip3 install "requests>=2.27,<3"
               runtime-versions:
                 nodejs: 22  # Update from default (v18) to latest supported NodeJS runtime
@@ -341,8 +423,7 @@ Resources:
                 - cd "./${PUBLIC_REPO_FOLDER#/}" && pwd
                 # Actual deploy/destroy instructions for this repository:
                 - npm install
-                - npx cdk bootstrap
-                - if [ "$CFN_EVENT_TYPE" = "Delete" ]; then npx cdk destroy --all --force; else npx cdk deploy --all --concurrency 8 --require-approval never; fi
+                - if [ "$CFN_EVENT_TYPE" = "Delete" ]; then npx cdktf destroy --auto-approve; else npx cdktf deploy --auto-approve --outputs-file cdktf.outputs.json; fi
               finally:
                 # Re-install requests in case it got overwritten:
                 - pip3 install "requests>=2.27,<3"
@@ -377,13 +458,13 @@ Resources:
                       if int(os.environ["CODEBUILD_BUILD_SUCCEEDING"]):
                           data["Status"] = "SUCCESS"
                           try:
-                              # Pass CDK deploy outputs as attributes of this CFn resource:
-                              with open("cdk.outputs.json") as fouts:
+                              # Pass CDKTF deploy outputs as attributes of this CFn resource:
+                              with open("cdktf.outputs.json") as fouts:
                                   outputs = json.load(fouts)
                                   data["Data"] = flatten(outputs)
                           except FileNotFoundError:
                               print(
-                                  "No cdk.outputs.json found: Have your deploy job create this "
+                                  "No cdktf.outputs.json found: Have your deploy job create this "
                                   "file if you want to pass outputs back to the bootstrap stack."
                               )
                       else:
@@ -561,7 +642,7 @@ Resources:
                       { "Reason": f"Started CodeBuild #{result['build']['buildNumber']}" },
                       # Changing physical ID would look like a 'replacement' to CloudFormation,
                       # causing it to send a delete/destroy request to the old physical ID after
-                      # running CDK deploy on the new one - which is pretty much never what we
+                      # running CDKTF deploy on the new one - which is pretty much never what we
                       # want.
                       physicalResourceId=event["LogicalResourceId"],
                   )
@@ -619,12 +700,14 @@ Resources:
       Runtime: python3.13
       Timeout: 900
 
-  # IF you enable CodeBuildCallback AND your deployment script creates 'cdk.outputs.json', the
+  # IF you enable CodeBuildCallback AND your deployment script creates 'cdktf.outputs.json', the
   # contents should be passed through as output attributes on this CFn resource to use how you want
   # For example, re-exposing them as outputs of this CFn bootstrap stack) with a reference like:
   #     !GetAtt SampleDeployment.MyStackName.SomeOutput
   SampleDeployment:
     Type: "Custom::CodeBuildTrigger"
+    DependsOn:
+      - EmptyTFStateBucketOnDelete  # Don't clear out TF state bucket til `terraform destroy` done
     Properties:
       ServiceToken: !GetAtt CodeBuildTriggerFunction.Arn
       ProjectName: !Ref CodeBuildProject
@@ -646,5 +729,5 @@ Outputs:
     Description: Link to project in AWS CodeBuild Console
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/${AWS::AccountId}/projects/${CodeBuildProject}"
   ExampleQueueArn:
-    Description: Example re-published CDK output - ARN of the created SQS Queue
-    Value: !GetAtt SampleDeployment.CdkFromCloudFormationExample.QueueArn
+    Description: Example re-published CDKTF output - ARN of the created SQS Queue
+    Value: !GetAtt SampleDeployment.CdktfFromCloudFormationExample.QueueArn
