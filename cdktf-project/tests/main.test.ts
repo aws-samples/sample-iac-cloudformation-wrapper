@@ -8,20 +8,16 @@ import { Testing } from "cdktf";
 import { CdktfProjectStack } from "../lib/stack";
 
 describe("Example CDKTF Stack", () => {
-
   it("contains an SQS queue with expected properties", () => {
     const app = Testing.app();
     const stack = new CdktfProjectStack(app, "test", {});
     const template = Testing.synth(stack);
 
     expect(template).toHaveResource(SqsQueue);
-    expect(template).toHaveResourceWithProperties(
-      SqsQueue,
-      {
-        "sqs_managed_sse_enabled": true,
-        "visibility_timeout_seconds": "${var.QueueVisibilityTimeout}",
-      }
-    );
+    expect(template).toHaveResourceWithProperties(SqsQueue, {
+      sqs_managed_sse_enabled: true,
+      visibility_timeout_seconds: "${var.QueueVisibilityTimeout}",
+    });
   });
 
   it("produces valid Terraform configuration", () => {

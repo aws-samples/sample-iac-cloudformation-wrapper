@@ -3,9 +3,13 @@
 // External Dependencies:
 import { AwsProvider } from "@cdktf/provider-aws/lib/provider";
 import { SqsQueue } from "@cdktf/provider-aws/lib/sqs-queue";
-import { S3Backend, TerraformOutput, TerraformStack, TerraformVariable } from "cdktf";
+import {
+  S3Backend,
+  TerraformOutput,
+  TerraformStack,
+  TerraformVariable,
+} from "cdktf";
 import { Construct } from "constructs";
-
 
 export interface ICdktfProjectStackConfig {
   /**
@@ -49,11 +53,15 @@ export class CdktfProjectStack extends TerraformStack {
     }
 
     // Example input (that we expose as a Terraform variable *and* to the bootstrap CFn):
-    const queueVisibilityTimeoutSecsVar = new TerraformVariable(this, "QueueVisibilityTimeout", {
-      description: "Visibility timeout for the created SQS queue in seconds",
-      type: "number",
-      default: config?.defaultQueueVisibilityTimeout || 300,
-    });
+    const queueVisibilityTimeoutSecsVar = new TerraformVariable(
+      this,
+      "QueueVisibilityTimeout",
+      {
+        description: "Visibility timeout for the created SQS queue in seconds",
+        type: "number",
+        default: config?.defaultQueueVisibilityTimeout || 300,
+      }
+    );
 
     // Example resource:
     const queue = new SqsQueue(this, "ExampleQueue", {
