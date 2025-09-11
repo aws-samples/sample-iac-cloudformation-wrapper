@@ -58,7 +58,7 @@ build:
                 
 ```
 
-As written, the template supports fetching `CodeRepo`s from 1/ .zip archives on Amazon S3, 2/ .zip archives somewhere else (via curl), or 3/ `git clone`able repository URLs. Since for many apps the root folder of the IaC project is not the root folder of the repository, you can use the `CodeRepoFolder` parameter to target which folder your commands should run from.
+As written, the template supports fetching `CodeRepo`s from: 1/ .zip archives on Amazon S3, 2/ .zip archives somewhere else (via curl), or 3/ `git clone`able repository URLs. Since for many apps the root folder of the IaC project is not the root folder of the repository, you can use the `CodeRepoFolder` parameter to target which folder your commands should run from.
 
 If you prefer to hard-code the location of your source in the template, rather than exposing it to users as overrideable parameters, you could remove the `CodeRepo`, `CodeRepoBranch`, and `CodeRepoFolder` parameters from the template and instead directly configure the `EnvironmentVariables` on the CodeBuild job.
 

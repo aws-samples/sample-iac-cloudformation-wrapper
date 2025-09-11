@@ -21,7 +21,7 @@ Since CDK itself uses CloudFormation to orchestrate deployments, users will see 
 
 This project is derived from the same base template you'd get by running `npx cdk init app --language=typescript` (see the [CLI reference](https://docs.aws.amazon.com/cdk/v2/guide/ref-cli-cmd-init.html)).
 
-(After `git clone`ing a local copy of the code, and with NodeJS installed), developers could run standard CDK commands (from this folder) like:
+(After `git clone`ing a local copy of the code, and with NodeJS installed), developers could run standard CDK commands from this folder - like:
 
 - `npm install` - Install the dependencies
 - `npm run lint` - Lint & format the source code
@@ -51,7 +51,7 @@ build:
     - if [ "$CFN_EVENT_TYPE" = "Delete" ]; then npx cdk destroy --all --force; else npx cdk deploy --all --concurrency 8 --require-approval never; fi
 ```
 
-As written, the template supports fetching `CodeRepo`s from 1/ .zip archives on Amazon S3, 2/ .zip archives somewhere else (via curl), or 3/ `git clone`able repository URLs. Since for many apps the root folder of the IaC project is not the root folder of the repository, you can use the `CodeRepoFolder` parameter to target which folder your commands should run from.
+As written, the template supports fetching `CodeRepo`s from: 1/ .zip archives on Amazon S3, 2/ .zip archives somewhere else (via curl), or 3/ `git clone`able repository URLs. Since for many apps the root folder of the IaC project is not the root folder of the repository, you can use the `CodeRepoFolder` parameter to target which folder your commands should run from.
 
 If you prefer to hard-code the location of your source in the template, rather than exposing it to users as overrideable parameters, you could remove the `CodeRepo`, `CodeRepoBranch`, and `CodeRepoFolder` parameters from the template and instead directly configure the `EnvironmentVariables` on the CodeBuild job.
 
@@ -64,7 +64,7 @@ In [cfn_bootstrap.yml](cfn_bootstrap.yml):
 1. Add your configuration to the `Parameters` section (like our `ExampleVisibilityTimeout`) - and update the `ParameterGroups` section [if you're using that](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-cloudformation-interface.html).
 2. Pass your parameter through to the CodeBuild `EnvironmentVariables` (like our `EXAMPLE_VISIBILITY_TIMEOUT`)
 3. In your CDK app, support configuring the value via your chosen environment variable (like our `queueVisibilityTimeout`)
-    - Remember, the `Default` value of your parameter in CloudFormation should match the default behaviour of your CDK app when the environment variable is unset, to avoid potential confusion.
+    - As a best practice, the `Default` value of your parameter in CloudFormation should match the default behaviour of your CDK app when the environment variable is unset, to avoid potential confusion.
 
 Where exactly you read the environment variable from in your CDK code is a question of design - but we've made it an explicit prop of the `CdkProjectStack` (in [lib/stack.ts](lib/stack.ts)) and set that in the top level entry point script [bin/app.ts](bin/app.ts), which keeps things a bit more transparent than having arbitrary constructs or resources in your `lib` reading from environment variables.
 
