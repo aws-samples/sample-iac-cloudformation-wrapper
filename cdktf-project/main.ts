@@ -21,7 +21,7 @@ new CdktfProjectStack(app, "CdktfFromCloudFormationExample", {
     : undefined,
 
   // Read Terraform backend config from environment variables if present:
-  s3BackendBucket: process.env.TF_BACKEND_BUCKET,
-  s3BackendKey: process.env.TF_BACKEND_KEY,
+  s3BackendBucket: process.env.TF_STATE_BUCKET,
+  s3BackendKey: process.env.TF_STATE_KEY,
 });
 app.synth();
